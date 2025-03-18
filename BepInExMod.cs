@@ -4,9 +4,13 @@ using BepInEx.Logging;
 using HarmonyLib;
 
 using System;
+using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
+using System.Timers;
 
 using UnityEngine;
+using UnityEngine.Analytics;
 
 
 namespace IronRebellionTelemetry
@@ -14,19 +18,12 @@ namespace IronRebellionTelemetry
     [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
     internal class BepInExPlugin : BaseUnityPlugin
     {
-        internal static new ManualLogSource Log;
+        internal static ManualLogSource Log;
 
-        public static float velocityX, velocityY, velocityZ;
-        public static float angularX, angularY, angularZ;
-        public static float rotationX, rotationY, rotationZ;
+        public static TelemetryData telemetry = new ();
+
+        
         public static float rumbleIntensity = 0f;
-
-        public static float currentTilt = 0f;
-        public static float currentLean = 0f;
-
-        public static bool isFlying = false;
-        public static bool isRunning = false;
-        public static bool isHit = false;
         public static bool mechOn = false;
         public static bool stage4Booted = false;
 
@@ -37,21 +34,19 @@ namespace IronRebellionTelemetry
         public static bool landedSend = false;
         public static bool jumpedSend = false;
         public static bool weaponFiredSend = false;
-
-        public static bool weaponFired = false;
-        public static bool stomped = false;
-        public static bool landed = false;
-        public static bool jumped = false;
-
+        
         private void Awake()
         {
-            BepInExPlugin.Log = base.Logger;
+            Log = Logger;
             Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
             Log.LogInfo("Finished patching.");
+            
             TelemetrySender.Start();
+
             Log.LogInfo("Started Telemetry Sender.");
         }
 
+        
         // RB Telemetry
 
         [HarmonyPatch(typeof(CockpitAnimationManager))]
@@ -60,7 +55,7 @@ namespace IronRebellionTelemetry
             private static readonly FieldInfo currentTiltField = AccessTools.Field(typeof(CockpitAnimationManager), "currentTilt");
             //private static readonly FieldInfo animField = AccessTools.Field(typeof(CockpitAnimationManager), "anim");
 
-            [HarmonyPatch(typeof(CockpitAnimationManager), "Update", new Type[] { })]
+            [HarmonyPatch(typeof(CockpitAnimationManager), "Update", [])]
             [HarmonyPostfix]
             private static void PostfixUpdate(CockpitAnimationManager __instance)
             {
@@ -69,81 +64,85 @@ namespace IronRebellionTelemetry
                 //Animator anim = (Animator)animField.GetValue(__instance);
                 //bool isBooting = anim.GetBool("Stage_4");
 
-                Vector3 worldVelocity;
-                Vector3 worldAngularVelocity;
 
                 // Convert to local space
                 Vector3 localVelocity = cockpitTransform.InverseTransformDirection(cockpitRB.velocity);
                 Vector3 localAngularVelocity = cockpitTransform.InverseTransformDirection(cockpitRB.angularVelocity);
 
-                BepInExPlugin.velocityX = localVelocity.x;
-                BepInExPlugin.velocityY = localVelocity.y;
-                BepInExPlugin.velocityZ = localVelocity.z;
+                telemetry.speed = localVelocity.magnitude;
 
-                BepInExPlugin.angularX = localAngularVelocity.x;
-                BepInExPlugin.angularY = localAngularVelocity.y;
-                BepInExPlugin.angularZ = localAngularVelocity.z;
- 
-                BepInExPlugin.rotationX = NormalizeAngle(cockpitTransform.rotation.eulerAngles.x);
-                BepInExPlugin.rotationY = cockpitTransform.rotation.eulerAngles.y;
-                BepInExPlugin.rotationZ = NormalizeAngle(cockpitTransform.rotation.eulerAngles.z);
+                telemetry.velocityX = localVelocity.x;
+                telemetry.velocityY = localVelocity.y;
+                telemetry.velocityZ = localVelocity.z;
+
+                telemetry.angularX = localAngularVelocity.x;
+                telemetry.angularY = localAngularVelocity.y;
+                telemetry.angularZ = localAngularVelocity.z;
+
+                telemetry.rotationX = NormalizeAngle(cockpitTransform.rotation.eulerAngles.x);
+                telemetry.rotationY = cockpitTransform.rotation.eulerAngles.y;
+                telemetry.rotationZ = NormalizeAngle(cockpitTransform.rotation.eulerAngles.z);
                 
                 //Accessing private field
-                BepInExPlugin.currentTilt = (float)currentTiltField.GetValue(__instance);
+                telemetry.adjustedTilt = (float)currentTiltField.GetValue(__instance);
 
                 //Reset signals
-                if(BepInExPlugin.stompedSend){
-                    BepInExPlugin.stomped = false;
-                    BepInExPlugin.stompedSend = false;
+                if(stompedSend)
+                {
+                    telemetry.stomped = false;
+                    stompedSend = false;
+                    //telemetry.stompedFoot = 0;
                 }
 
-                if (BepInExPlugin.landedSend)
+                if (landedSend)
                 {
-                    BepInExPlugin.landed = false;
-                    BepInExPlugin.landedSend = false;
+                    telemetry.landed = false;
+                    landedSend = false;
                 }
 
-                if (BepInExPlugin.jumpedSend)
+                if (jumpedSend)
                 {
-                    BepInExPlugin.jumped = false;
-                    BepInExPlugin.jumpedSend = false;
+                    telemetry.jumped = false;
+                    jumpedSend = false;
                 }
 
-                if (BepInExPlugin.weaponFiredSend)
+                if (weaponFiredSend)
                 {
-                    BepInExPlugin.weaponFired = false;
-                    BepInExPlugin.weaponFiredSend = false;
+                    telemetry.weaponFired = false;
+                    weaponFiredSend = false;
                 }
 
                 // Reset rotation if inside lobby
                 if (!PlayerRig.rigInstance.transform.parent)
                 {
-                    rotationX = 0f;
-                    rotationZ = 0f;
+                    telemetry.rotationX = 0f;
+                    telemetry.rotationZ = 0f;
                 }
             }
 
             private static float NormalizeAngle(float angle)
             {
-                return (angle > 180f) ? angle - 360f : angle;
+                return (angle >= 180f) ? angle - 360f : angle;
             }
 
             [HarmonyPatch(typeof(CockpitAnimationManager), "SetLean", new Type[] { typeof(float) })]
             [HarmonyPrefix]
             private static void Prefix(ref float speedScale, CockpitAnimationManager __instance)
             {
-                BepInExPlugin.currentLean = __instance.rJoystick.horizontal * speedScale * __instance.leanMultiplier * Mathf.Sign(__instance.rJoystick.horizontal);
+                telemetry.currentLean = __instance.rJoystick.horizontal * speedScale * __instance.leanMultiplier * Mathf.Sign(__instance.rJoystick.horizontal);
             }
 
-            [HarmonyPatch(typeof(CockpitAnimationManager), "JumpAnimation", new Type[] { })]
+            [HarmonyPatch(typeof(CockpitAnimationManager), "JumpAnimation", [])]
             [HarmonyPostfix]
             private static void PostfixJumpAnimation()
             {
-                BepInExPlugin.jumped = true;
+                telemetry.jumped = true;
             }
         }
 
+        private static float previousFoot = 0;
 
+        
         // Shaking
 
         [HarmonyPatch(typeof(CockpitAnimationSounds), "PlayStompSound")]
@@ -153,42 +152,45 @@ namespace IronRebellionTelemetry
             [HarmonyPostfix]
             private static void PostfixPlayStompSound()
             {
-                BepInExPlugin.stomped = true;
+                telemetry.stomped = true;
+                telemetry.stompedFoot = previousFoot >= 0 ? -1 : 1;
+                previousFoot = telemetry.stompedFoot;
+
             }
 
             [HarmonyPatch(typeof(CockpitAnimationSounds), "StartFlyingSound")]
             [HarmonyPostfix]
             private static void PostfixStartFlyingSound()
             {
-                BepInExPlugin.isFlying = true;
+                telemetry.isFlying = true;
             }
 
             [HarmonyPatch(typeof(CockpitAnimationSounds), "EndFlyingSound")]
             [HarmonyPostfix]
             private static void PostfixEndFlyingSound()
             {
-                BepInExPlugin.isFlying = false;
+                telemetry.isFlying = false;
             }
 
             [HarmonyPatch(typeof(CockpitAnimationSounds), "StartSprintSound")]
             [HarmonyPostfix]
             private static void PostfixStartSprintSound()
             {
-                BepInExPlugin.isRunning = true;
+                telemetry.isRunning = true;
             }
 
             [HarmonyPatch(typeof(CockpitAnimationSounds), "EndSprintSound")]
             [HarmonyPostfix]
             private static void PostfixEndSprintSound()
             {
-                BepInExPlugin.isRunning = false;
+                telemetry.isRunning = false;
             }
 
             [HarmonyPatch(typeof(CockpitAnimationSounds), "PlayLandingSound")]
             [HarmonyPostfix]
             private static void PostfixPlayLandingSound()
             {
-                BepInExPlugin.landed = true;
+                telemetry.landed = true;
             }
         }
 
@@ -205,14 +207,14 @@ namespace IronRebellionTelemetry
                 // Weapon fired is too long true: Until the weapon reloads fully. I only want the inital impule
                 //BepInExPlugin.weaponFired = (bool)weaponFiredField.GetValue(__instance);
 
-                BepInExPlugin.isHit = (bool)isHitField.GetValue(__instance);
+                telemetry.isHit = (bool)isHitField.GetValue(__instance);
             }
 
             [HarmonyPatch(typeof(CockpitHitter), "FireWeapon", new Type[] { typeof(int) })]
             [HarmonyPostfix]
             public static void Postfix()
             {
-                BepInExPlugin.weaponFired = true;
+                telemetry.weaponFired = true;
             }
         }
 

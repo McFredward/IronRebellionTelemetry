@@ -3,10 +3,11 @@ using System.Net.Sockets;
 using System.Threading;
 using System;
 using BepInEx.Logging;
+using System.Runtime.InteropServices;
 
 namespace IronRebellionTelemetry
 {
-    public class TelemetrySender
+    public class TelemetrySender //: IDisposable
     {
         private static Thread senderThread;
         private static bool isRunning = false;
@@ -24,6 +25,8 @@ namespace IronRebellionTelemetry
         private static int weaponFiredIterations = 6;
         private static int weaponFiredCounter = 0;
 
+
+        
         public static void Start()
         {
             if (isRunning) return;
@@ -44,74 +47,48 @@ namespace IronRebellionTelemetry
             BepInExPlugin.Log.LogInfo("TelemetrySender stopped");
         }
 
-        private static void SendTelemetry()
+        public static void SendTelemetry()
         {
             while (isRunning)
             {
                 try
                 {
-                    byte[] data = new byte[51]; 
-
-                    // Copy float values (48 bytes in total)
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.velocityX), 0, data, 0, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.velocityY), 0, data, 4, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.velocityZ), 0, data, 8, 4);
-
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.angularX), 0, data, 12, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.angularY), 0, data, 16, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.angularZ), 0, data, 20, 4);
-
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.rotationX), 0, data, 24, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.rotationY), 0, data, 28, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.rotationZ), 0, data, 32, 4);
-
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.currentTilt), 0, data, 36, 4);
-                    Buffer.BlockCopy(BitConverter.GetBytes(BepInExPlugin.currentLean), 0, data, 40, 4);
-
-                    data[44] = (byte)(BepInExPlugin.isFlying ? 1 : 0);
-                    data[45] = (byte)(BepInExPlugin.isRunning ? 1 : 0);
-                    data[46] = (byte)(BepInExPlugin.isHit ? 1 : 0);
-                    data[47] = (byte)(BepInExPlugin.weaponFired ? 1 : 0);
-                    data[48] = (byte)(BepInExPlugin.stomped ? 1 : 0);
-                    data[49] = (byte)(BepInExPlugin.landed ? 1 : 0);
-                    data[50] = (byte)(BepInExPlugin.jumped ? 1 : 0);
-
-
+                    TelemetryData telemetry = BepInExPlugin.telemetry;
+                    var data = ToBytes(telemetry);
 
                     udpClient.Send(data, data.Length, targetIP, port);
-                    if (BepInExPlugin.stomped)
-                    {
-                        stompedCounter++;
-                    }
-                    if (BepInExPlugin.landed)
-                    {
-                        landedCounter++;
-                    }
-                    if (BepInExPlugin.jumped)
-                    {
-                        jumpedCounter++;
-                    }
-                    if (BepInExPlugin.weaponFired)
-                    {
-                        weaponFiredCounter++;
-                    }
 
-                    if (BepInExPlugin.stomped && stompedCounter > stompedIterations)
+                    if (telemetry.stomped)
+                    {
+                        stompedCounter++;                        
+                    }
+                    
+                    if (telemetry.landed) landedCounter++;
+                    
+                    if (telemetry.jumped) jumpedCounter++;
+                    
+                    if (telemetry.weaponFired) weaponFiredCounter++;
+                    
+
+                    if (telemetry.stomped && stompedCounter > stompedIterations)
                     {
                         BepInExPlugin.stompedSend = true;
                         stompedCounter = 0;
                     }
-                    if (BepInExPlugin.landed && landedCounter > landedIterations)
+
+                    if (telemetry.landed && landedCounter > landedIterations)
                     {
                         BepInExPlugin.landedSend = true;
                         landedCounter = 0;
                     }
-                    if (BepInExPlugin.jumped && jumpedCounter > jumpedIterations)
+
+                    if (telemetry.jumped && jumpedCounter > jumpedIterations)
                     {
                         BepInExPlugin.jumpedSend = true;
                         jumpedCounter = 0;
                     }
-                    if (BepInExPlugin.weaponFired && weaponFiredCounter > weaponFiredIterations)
+
+                    if (telemetry.weaponFired && weaponFiredCounter > weaponFiredIterations)
                     {
                         BepInExPlugin.weaponFiredSend = true;
                         weaponFiredCounter = 0;
@@ -123,6 +100,39 @@ namespace IronRebellionTelemetry
                 }
 
                 Thread.Sleep(interval);
+            }
+        }
+
+        static byte[] ToBytes<T>(T data) where T : struct
+        {
+            int size = Marshal.SizeOf(data);
+            byte[] arr = new byte[size];
+            using (SafeBuffer buffer = new SafeBuffer(size))
+            {
+                Marshal.StructureToPtr(data, buffer.DangerousGetHandle(), true);
+                Marshal.Copy(buffer.DangerousGetHandle(), arr, 0, size);
+            }
+            return arr;
+        }
+
+        public void Dispose()
+        {
+            Stop();
+        }
+
+        internal class SafeBuffer : SafeHandle
+        {
+            public SafeBuffer(int size) : base(IntPtr.Zero, true)
+            {
+                SetHandle(Marshal.AllocHGlobal(size));
+            }
+
+            public override bool IsInvalid => handle == IntPtr.Zero;
+
+            protected override bool ReleaseHandle()
+            {
+                Marshal.FreeHGlobal(handle);
+                return true;
             }
         }
     }
